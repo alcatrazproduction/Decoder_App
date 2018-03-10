@@ -1,5 +1,5 @@
 /* 
- * Transponder emulation for MyLaps
+ * Decoder emulation for MyLaps
  * 
  * From a developpement from Cano
  * 

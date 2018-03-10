@@ -3,7 +3,7 @@
 # project subdirectory.
 #
 
-PROJECT_NAME := transponder_thor
+PROJECT_NAME := decoder_thor
 
 include $(IDF_PATH)/make/project.mk
 
