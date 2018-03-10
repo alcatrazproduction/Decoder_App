@@ -13,6 +13,9 @@ _ropeproject/
 *.bak
 *.rej
 *~
+*.o
+*.d
+build/
 cur/
 tmp/
 __pycache__/
