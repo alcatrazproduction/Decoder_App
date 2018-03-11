@@ -58,7 +58,7 @@ static const char* MYLAPS_TAG = "MyLaps";
 
 #if RMT_TX_CARRIER_TEST
 
-#define RMT_TX_CARRIER_EN    true   /*!< Disable carrier for self test mode  */
+#define RMT_TX_CARRIER_EN    false   /*!< Disable carrier for self test mode  */
 
 #else
 
@@ -357,18 +357,7 @@ static unsigned char * Mylaps_Encoder( unsigned long inp,	unsigned int gInt, uns
 		
 		for( int b=0;b<8;b++)
 		{
-//			if( current_bit == last_bit ) 	// test if previsous bit is the same 
 			{ 																				// the and four cycles
-//				if( i % 2 )
-//				{
-//					item[i/2].duration0	=	duration;
-//					item[i/2].level0	=	0;
-//				}
-//				else
-//				{
-//					item[i/2].duration1	=	duration;
-//					item[i/2].level1	=	1;
-//				}
 				item[i].duration	=	duration;
 				item[i].level		=	i % 2? 0 : 1;
 				i++;
@@ -386,6 +375,30 @@ static unsigned char * Mylaps_Encoder( unsigned long inp,	unsigned int gInt, uns
    return i;
 }
 
+*
+ * @brief RMT receiver initialization
+ */
+static void MyLaps_rx_init()
+{
+	nvs_flash_init();
+    rmt_config_t rmt_rx;
+	
+    rmt_rx.channel 							= RMT_TX_CHANNEL;
+    rmt_rx.gpio_num 						= RMT_TX_GPIO_NUM;
+    rmt_rx.clk_div 							= RMT_CLK_DIV;
+    rmt_rx.mem_block_num 					= 8;
+    rmt_rx.rmt_mode 						= RMT_MODE_RX;
+    rmt_rx.rx_config.filter_en 				= true;
+    rmt_rx.rx_config.filter_ticks_thresh 	= RMT_CLK_DIV * 8;				// Set to 10Mhz ( 80Mhz / 8 = 10 Mhz )
+    rmt_rx.rx_config.idle_threshold 		= RMT_CLK_DIV * 8 * 2 * 4;		// 4 cylcles without clock TODO: may be less
+	
+    rmt_config(&rmt_rx);
+    rmt_driver_install(rmt_rx.channel, 2040, 0);
+
+	gpio_set_direction	( RMT_TX_GPIO_NUM, GPIO_MODE_INPUT);
+	gpio_pullup_en		( RMT_TX_GPIO_NUM );
+
+}
 
 /*
  * @brief RMT transmitter initialization
@@ -415,13 +428,15 @@ static void MyLaps_tx_init()
 	
 	// Set the direction of the first radio output ( not inverted)
 	
-	gpio_set_direction	( RMT_TX_GPIO_NUM, GPIO_MODE_OUTPUT);
-	gpio_matrix_out		( RMT_TX_GPIO_NUM, RMT_SIG_OUT0_IDX, 0, 0);
+	gpio_set_direction			( RMT_TX_GPIO_NUM, GPIO_MODE_OUTPUT);
+	gpio_set_drive_capability	( RMT_TX_GPIO_NUM, GPIO_DRIVE_CAP_MAX);		// TODO: Add to Transponder App also
+	gpio_matrix_out				( RMT_TX_GPIO_NUM, RMT_SIG_OUT0_IDX, 0, 0);
 	
 	// Set the direction of the second radio output ( will be inverted)
 	
-	gpio_set_direction	(_RMT_TX_GPIO_NUM, GPIO_MODE_OUTPUT);
-	gpio_matrix_out		(_RMT_TX_GPIO_NUM, RMT_SIG_OUT0_IDX, 1, 0);
+	gpio_set_direction			(_RMT_TX_GPIO_NUM, GPIO_MODE_OUTPUT);
+	gpio_set_drive_capability	(_RMT_TX_GPIO_NUM, GPIO_DRIVE_CAP_MAX);		// TODO: Add to Transponder App also
+	gpio_matrix_out				(_RMT_TX_GPIO_NUM, RMT_SIG_OUT0_IDX, 1, 0);
 
 	//PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[RMT_TX_GPIO_NUM], PIN_FUNC_GPIO);
 	//gpio_pad_select_gpio(RMT_TX_GPIO_NUM);
@@ -508,6 +523,54 @@ rmt_source_clk_t 	srcClk;
 }
 
 /**
+ * @brief RMT receiver demo, this task will print each received NEC data.
+ *
+ */
+static void rmt_myLap_rx_task()
+{
+    int channel = RMT_RX_CHANNEL;
+    MyLaps_rx_init();
+    RingbufHandle_t rb = NULL;
+    //get RMT RX ringbuffer
+    rmt_get_ringbuf_handle(channel, &rb);
+    rmt_rx_start(channel, 1);
+    while(rb) 
+	{
+        size_t rx_size = 0;
+        //try to receive data from ringbuffer.
+        //RMT driver will push all the data it receives to its ringbuffer.
+        //We just need to parse the value and return the spaces of ringbuffer.
+        rmt_item32_t* item = (rmt_item32_t*) xRingbufferReceive(rb, &rx_size, 1000);
+        if(item) 
+		{
+            uint16_t rmt_addr;
+            uint16_t rmt_cmd;
+            int offset = 0;
+            while(1) 
+			{
+                //parse data value from ringbuffer.
+                int res = nec_parse_items(item + offset, rx_size / 4 - offset, &rmt_addr, &rmt_cmd);
+                if(res > 0) 
+				{
+                    offset += res + 1;
+                    ESP_LOGI(NEC_TAG, "RMT RCV --- addr: 0x%04x cmd: 0x%04x", rmt_addr, rmt_cmd);
+                } 
+                else 
+				{
+                    break;
+                }
+            }
+            //after parsing the data, return spaces to ringbuffer.
+            vRingbufferReturnItem(rb, (void*) item);
+        } 
+        else 
+		{
+            break;
+        }
+    }
+    vTaskDelete(NULL);
+}
+/**
  * @brief RMT transmitter , this task will periodically send transponder telegram
  *
  */
@@ -535,13 +598,10 @@ static void rmt_mylap_tx_task()
 	item_num = MyLaps_CreateTelegram(channel, rmt_current , item_num,radio_msg);
 	
 	ESP_LOGI(MYLAPS_TAG, "RMT TX DATA");
-	
 	ESP_LOGI(MYLAPS_TAG, "rmt_set_mem_block_num        %d  ",rmt_set_mem_block_num	( channel, 8 ) 														);
 	ESP_LOGI(MYLAPS_TAG, "rmt_write_items              %d  ",rmt_write_items		( channel, (rmt_item32_t *) rmt_current, (item_num + 1) / 2, true	));	// it is base on two half !
 	ESP_LOGI(MYLAPS_TAG, "rmt_set_tx_loop_mode         %d  ",rmt_set_tx_loop_mode	( channel, true)													);
 	ESP_LOGI(MYLAPS_TAG, "rmt_tx_start                 %d  ",rmt_tx_start			( channel, true )													);
-	
-	
 	
 	for(;;) 
 	{
@@ -578,6 +638,8 @@ static void wifi_mylap_tx_task()
 
 void app_main()
 {
-    xTaskCreate(rmt_mylap_tx_task, "MyLaps Transponder Task", 2048, NULL, 10, NULL);
+#if FALSE
+    xTaskCreate(rmt_mylap_tx_task, "MyLaps Transponder Task", 2048, NULL, 10, NULL);	// disaebled, will only be in receive modus
+#endif
     xTaskCreate(wifi_mylap_tx_task, "MyLaps Wifi Task", 2048, NULL, 10, NULL);
 }
